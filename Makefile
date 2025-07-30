@@ -28,7 +28,7 @@
 #  ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 #  POSSIBILITY OF SUCH DAMAGE.
 
-TARGET = monero-pool
+TARGET = salvium-pool
 
 TYPE = debug
 
@@ -36,33 +36,37 @@ ifeq ($(MAKECMDGOALS),release)
   TYPE = release
 endif
 
-ifeq ($(origin MONERO_BUILD_ROOT), undefined)
-  MONERO_BUILD_ROOT = \
-    ${MONERO_ROOT}/build/$(shell echo `uname | \
+ifeq ($(origin SALVIUM_BUILD_ROOT), undefined)
+  SALVIUM_BUILD_ROOT = \
+    ${SALVIUM_ROOT}/build/$(shell echo `uname | \
     sed -e 's|[:/\\ \(\)]|_|g'`/` \
-    git -C ${MONERO_ROOT} branch | \
+    git -C ${SALVIUM_ROOT} branch | \
     grep '\* ' | cut -f2- -d' '| \
     sed -e 's|[:/\\ \(\)]|_|g'`)/release
 endif
 
-MONERO_INC = \
-  ${MONERO_ROOT}/src \
-  ${MONERO_ROOT}/external \
-  ${MONERO_ROOT}/external/easylogging++ \
-  ${MONERO_ROOT}/contrib/epee/include
+SALVIUM_INC = \
+  ${SALVIUM_ROOT}/src \
+  ${SALVIUM_ROOT}/external \
+  ${SALVIUM_ROOT}/external/easylogging++ \
+  ${SALVIUM_ROOT}/contrib/epee/include
 
-MONERO_LIBS = \
-  ${MONERO_BUILD_ROOT}/src/cryptonote_basic/libcryptonote_basic.a \
-  ${MONERO_BUILD_ROOT}/src/crypto/libcncrypto.a \
-  ${MONERO_BUILD_ROOT}/src/common/libcommon.a \
-  ${MONERO_BUILD_ROOT}/src/ringct/libringct_basic.a \
-  ${MONERO_BUILD_ROOT}/src/device/libdevice.a \
-  ${MONERO_BUILD_ROOT}/src/cryptonote_basic/libcryptonote_format_utils_basic.a \
-  ${MONERO_BUILD_ROOT}/src/crypto/wallet/libwallet-crypto.a \
-  ${MONERO_BUILD_ROOT}/contrib/epee/src/libepee.a \
-  ${MONERO_BUILD_ROOT}/external/easylogging++/libeasylogging.a \
-  ${MONERO_BUILD_ROOT}/src/libversion.a \
-  ${MONERO_BUILD_ROOT}/external/randomx/librandomx.a
+SALVIUM_LIBS = \
+  ${SALVIUM_BUILD_ROOT}/src/oracle/liboracle.a \
+  ${SALVIUM_BUILD_ROOT}/src/serialization/libserialization.a \
+  ${SALVIUM_BUILD_ROOT}/contrib/epee/src/libepee.a \
+  ${SALVIUM_BUILD_ROOT}/src/cryptonote_basic/libcryptonote_basic.a \
+  ${SALVIUM_BUILD_ROOT}/src/cryptonote_basic/libcryptonote_format_utils_basic.a \
+  ${SALVIUM_BUILD_ROOT}/src/crypto/libcncrypto.a \
+  ${SALVIUM_BUILD_ROOT}/src/common/libcommon.a \
+  ${SALVIUM_BUILD_ROOT}/src/ringct/libringct_basic.a \
+  ${SALVIUM_BUILD_ROOT}/src/device/libdevice.a \
+  ${SALVIUM_BUILD_ROOT}/src/crypto/wallet/libwallet-crypto.a \
+  ${SALVIUM_BUILD_ROOT}/external/easylogging++/libeasylogging.a \
+  ${SALVIUM_BUILD_ROOT}/src/libversion.a \
+  ${SALVIUM_BUILD_ROOT}/external/randomx/librandomx.a \
+  ${SALVIUM_BUILD_ROOT}/src/cryptonote_core/libcryptonote_core.a \
+  ${SALVIUM_BUILD_ROOT}/src/rpc/librpc_base.a 
 
 DIRS = src data rxi/log/src
 
@@ -73,7 +77,7 @@ CPPDEFS = _GNU_SOURCE AUTO_INITIALIZE_EASYLOGGINGPP LOG_USE_COLOR
 W = -W -Wall -Wno-unused-parameter -Wuninitialized -Wno-attributes
 OPT = -maes -fPIC
 CFLAGS += $(W) -Wbad-function-cast $(OPT) -std=c99
-CXXFLAGS += $(W) -Wno-reorder $(OPT) -std=c++14
+CXXFLAGS += $(W) -Wno-reorder $(OPT) -std=c++17
 LDPARAM += -fPIC -pie
 
 ifeq ($(OS), Darwin)
@@ -95,38 +99,49 @@ endif
 
 LDPARAM += $(LDFLAGS)
 
-LIBS := lmdb pthread unbound
-ifeq ($(OS), Darwin)
-  LIBS += c++ \
-	  boost_system-mt boost_date_time-mt boost_chrono-mt \
-	  boost_filesystem-mt boost_thread-mt boost_regex-mt \
-	  boost_serialization-mt boost_program_options-mt
-else
-  LIBS += dl uuid \
-	  boost_system boost_date_time boost_chrono \
-	  boost_filesystem boost_thread boost_regex \
-	  boost_serialization boost_program_options
-endif
+LIBS := 
+#ifeq ($(OS), Darwin)
+#  LIBS += c++ \
+#	  boost_system-mt boost_date_time-mt boost_chrono-mt \
+#	  boost_filesystem-mt boost_thread-mt boost_regex-mt \
+#	  boost_serialization-mt boost_program_options-mt
+#else
+#  LIBS += dl uuid \
+#	  boost_system boost_date_time boost_chrono \
+#	  boost_filesystem boost_thread boost_regex \
+#	  boost_serialization boost_program_options
+#endif
 
 HID_FOUND := $(shell grep -qo HIDAPI_LIBRARY-NOTFOUND \
-  ${MONERO_BUILD_ROOT}/CMakeCache.txt; echo $$?)
+  ${SALVIUM_BUILD_ROOT}/CMakeCache.txt; echo $$?)
 ifeq ($(HID_FOUND), 1)
   LIBS += hidapi-libusb
 endif
 
-PKG_LIBS := $(shell pkg-config \
-  "libevent_core >= 2.1" \
-  "libevent_pthreads >= 2.1" \
-  "libevent_extra >= 2.1" \
-  json-c \
-  openssl \
-  libsodium \
-  --libs)
+PKG_LIBS := 
+#PKG_LIBS := $(shell pkg-config \
+#  "libevent_core >= 2.1" \
+#  "libevent_pthreads >= 2.1" \
+#  "libevent_extra >= 2.1" \
+#  json-c \
+#  openssl \
+#  libsodium \
+#  --libs)
 
-STATIC_LIBS = 
+STATIC_LIBS = \
+  -Wl,-Bstatic \
+  -llmdb -lunbound -lnettle -lhogweed -lgmp \
+  -luuid -lboost_system -lboost_date_time -lboost_chrono \
+  -lboost_filesystem -lboost_thread -lboost_regex \
+  -lboost_serialization -lboost_program_options \
+  -lhidapi-libusb -levent_core -levent_pthreads \
+  -levent -levent_extra -ljson-c -lssl -lcrypto -lsodium \
+  -Wl,-Bdynamic \
+  -lpthread -ldl
+
 DLIBS =
 
-INCPATH := $(DIRS) ${MONERO_INC} /opt/local/include /usr/local/include
+INCPATH := $(DIRS) ${SALVIUM_INC} /opt/local/include /usr/local/include
 
 PKG_INC := $(shell pkg-config \
   "libevent_core >= 2.1" \
@@ -164,7 +179,7 @@ $(TARGET): preflight dirs $(OBJECTS) $(COBJECTS) $(SOBJECTS) $(HTMLOBJECTS)
 	@echo Linking $(OBJECTS)...
 	$(CXX) -o $(STORE)/$(TARGET) \
 	  $(OBJECTS) $(COBJECTS) $(SOBJECTS) $(HTMLOBJECTS) \
-	  $(LDPARAM) $(MONERO_LIBS) \
+	  $(LDPARAM) -Wl,--start-group $(SALVIUM_LIBS) -Wl,--end-group \
 	  $(foreach LIBRARY, $(LIBS),-l$(LIBRARY)) \
 	  $(foreach LIB,$(LIBPATH),-L$(LIB)) \
 	  $(PKG_LIBS) $(STATIC_LIBS)
@@ -223,13 +238,13 @@ dirs:
 	  if [ ! -e $(STORE)/$(DIR) ]; then mkdir -p $(STORE)/$(DIR); fi; )
 
 preflight:
-ifeq ($(origin MONERO_ROOT), undefined)
-  $(error You need to set an environment variable MONERO_ROOT \
+ifeq ($(origin SALVIUM_ROOT), undefined)
+  $(error You need to set an environment variable SALVIUM_ROOT \
     to your monero repository root)
 endif
-ifndef PKG_LIBS
-  $(error Missing dependencies)
-endif
+#ifndef PKG_LIBS
+#  $(error Missing dependencies)
+#endif
 ifndef XXD
   $(error Command xxd not found)
 endif
