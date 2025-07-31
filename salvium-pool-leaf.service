@@ -1,0 +1,46 @@
+# Salvium Leaf Pool Systemd Service
+# /etc/systemd/system/salvium-pool-leaf.service
+
+[Unit]
+Description=Salvium Leaf Mining Pool
+After=network.target salviumd.service
+Wants=salviumd.service
+Requires=network.target
+
+[Service]
+Type=simple
+User=salvium
+Group=salvium
+WorkingDirectory=/home/salvium/pool-leaf
+ExecStart=/home/salvium/pool-leaf/salvium-pool -c /home/salvium/pool-leaf/pool-leaf.conf
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=salvium-pool-leaf
+
+# Security settings
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/home/salvium/pool-leaf
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictRealtime=true
+RestrictNamespaces=true
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=4096
+
+# Environment
+Environment=HOME=/home/salvium
+Environment=USER=salvium
+Environment=SALVIUM_ROOT=/home/salvium/salvium_io
+Environment=SALVIUM_BUILD_ROOT=/home/salvium/salvium_io/build/Linux/main/release
+
+[Install]
+WantedBy=multi-user.target
+

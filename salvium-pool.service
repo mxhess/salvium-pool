@@ -1,0 +1,45 @@
+# Salvium Pool Systemd Service
+# /etc/systemd/system/salvium-pool.service
+
+[Unit]
+Description=Salvium Mining Pool
+After=network.target
+Requires=network.target
+
+[Service]
+Type=simple
+User=pooluser
+Group=pooluser
+WorkingDirectory=/home/pooluser/pool
+ExecStart=/home/pooluser/pool/salvium-pool -c /home/pooluser/pool/pool.conf
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=salvium-pool
+
+# Security settings
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/home/pooluser/pool
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictRealtime=true
+RestrictNamespaces=true
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=4096
+
+# Environment
+Environment=HOME=/home/pooluser
+Environment=USER=pooluser
+Environment=SALVIUM_ROOT=/home/pooluser/salvium_io
+Environment=SALVIUM_BUILD_ROOT=/home/pooluser/salvium_io/build/Linux/main/release
+
+[Install]
+WantedBy=multi-user.target
+
