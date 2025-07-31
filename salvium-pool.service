@@ -20,15 +20,15 @@ StandardError=journal
 SyslogIdentifier=salvium-pool
 
 # Security settings
-NoNewPrivileges=true
-ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=/home/pooluser/pool
-PrivateTmp=true
-ProtectKernelTunables=true
-ProtectControlGroups=true
-RestrictRealtime=true
-RestrictNamespaces=true
+#NoNewPrivileges=true
+#ProtectSystem=strict
+#ProtectHome=true
+#ReadWritePaths=/home/pooluser/pool
+#PrivateTmp=true
+#ProtectKernelTunables=true
+#ProtectControlGroups=true
+#RestrictRealtime=true
+#RestrictNamespaces=true
 
 # Resource limits
 LimitNOFILE=65536
