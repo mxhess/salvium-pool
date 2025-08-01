@@ -1597,7 +1597,7 @@ response_to_block_template(json_object *result,
             block_template->hashing_blob+75);
     log_trace("Transactions: %"PRIu64, block_template->tx_count);
 
-    if (pow_variant >= 6)
+    if (pow_variant >= 3)
     {
         unsigned char seed_hash_bin[32] = {0};
         JSON_GET_OR_WARN(seed_hash, result, json_type_string);
