@@ -98,6 +98,21 @@ def store_timeseries_data(key, value):
     cutoff = timestamp - TTL
     r.zremrangebyscore(key, "-inf", cutoff)
 
+def store_miner_hashrate(address, hashrate):
+    """Store miner hashrate data for charting"""
+    timestamp = int(time.time())
+    key = f'miner:{address}:hashrate'
+    
+    # Store the data point
+    r.zadd(key, {f"{timestamp}:{hashrate}": timestamp})
+    
+    # Set TTL on the sorted set
+    r.expire(key, TTL)
+    
+    # Clean old entries (keep last 3 days)
+    cutoff = timestamp - TTL
+    r.zremrangebyscore(key, "-inf", cutoff)
+
 def collect_pool_data():
     """Collect and store pool data from all nodes"""
     logger.info("Collecting pool data from all nodes...")
@@ -321,6 +336,7 @@ def get_miner_stats(address):
         # Query nodes for miner data
         total_miner_hashrate = 0
         total_miner_balance = 0
+        total_paid_balance = 0
         downstream_worker_count = 0
         miner_hr_stats = [0, 0, 0, 0, 0, 0]
         found_on_nodes = []
@@ -346,6 +362,7 @@ def get_miner_stats(address):
                             
                             total_miner_hashrate += stats.get('miner_hashrate', 0)
                             total_miner_balance += stats.get('miner_balance', 0)
+                            total_paid_balance += stats.get('miner_paid', 0)  # Add paid balance
                             
                             # Only count workers from downstream nodes (not core)
                             if 'core.supportsal.com' not in node_url:
@@ -364,6 +381,10 @@ def get_miner_stats(address):
                 except Exception as e:
                     logger.error(f"Error fetching miner stats from {node_url}: {e}")
         
+        # Store miner hashrate for charting
+        if total_miner_hashrate > 0:
+            store_miner_hashrate(address, total_miner_hashrate)
+        
         logger.info(f"Miner results: hr={total_miner_hashrate}, workers={downstream_worker_count}")
         
         if total_miner_hashrate == 0 and total_miner_balance == 0 and downstream_worker_count == 0:
@@ -374,6 +395,7 @@ def get_miner_stats(address):
         result.update({
             "miner_hashrate": total_miner_hashrate,
             "miner_balance": total_miner_balance,
+            "miner_paid": total_paid_balance,  # Add paid balance to response
             "worker_count": downstream_worker_count,  # Use only downstream count
             "miner_hashrate_stats": miner_hr_stats,
             "found_on_nodes": found_on_nodes,
@@ -448,58 +470,28 @@ def get_workers():
 
 @app.route('/api/charts')
 def get_chart_data():
-    """Get chart data - live data for immediate charts, Redis for historical"""
+    """Get chart data from Redis"""
     try:
         hours = int(request.args.get('hours', 8))
+        start_time, end_time = get_time_range(hours)
         chart_type = request.args.get('type', 'pool')
         address = request.args.get('address', '')
         
         chart_data = {}
         
-        if chart_type in ['all', 'miner'] and address:
-            # Get live miner hashrate data (immediate chart)
-            with live_data_lock:
-                if address in live_hashrate_data['miners']:
-                    live_data = live_hashrate_data['miners'][address]
-                    chart_data['miner_hashrate'] = [[t, h] for t, h in live_data]
-                else:
-                    chart_data['miner_hashrate'] = []
-            
-            logger.info(f"Live miner chart data points: {len(chart_data.get('miner_hashrate', []))}")
-        
-        if chart_type in ['all', 'pool']:
-            # Get live pool hashrate data (immediate chart)
-            with live_data_lock:
-                live_data = live_hashrate_data['pool']
-                chart_data['pool_hashrate'] = [[t, h] for t, h in live_data]
-            
-            logger.info(f"Live pool chart data points: {len(chart_data.get('pool_hashrate', []))}")
-            
-            # Also try to get historical data from Redis for longer charts
-            if hours > 1:  # For longer time ranges, supplement with Redis data
-                start_time, end_time = get_time_range(hours)
-                
-                redis_data = r.zrangebyscore('pool:hashrate', start_time, end_time)
-                redis_parsed = parse_redis_timeseries(redis_data)
-                
-                if redis_parsed:
-                    # Merge live and historical data, removing duplicates
-                    combined_data = redis_parsed + chart_data['pool_hashrate']
-                    # Sort by timestamp and remove duplicates
-                    seen_timestamps = set()
-                    unique_data = []
-                    for timestamp, value in sorted(combined_data):
-                        if timestamp not in seen_timestamps:
-                            unique_data.append([timestamp, value])
-                            seen_timestamps.add(timestamp)
-                    
-                    chart_data['pool_hashrate'] = unique_data[-100:]  # Keep last 100 points
-        
         if chart_type in ['all', 'network']:
-            # Network data from Redis only
-            start_time, end_time = get_time_range(hours)
             network_data = r.zrangebyscore('network:hashrate', start_time, end_time)
             chart_data['network_hashrate'] = parse_redis_timeseries(network_data)
+            
+        if chart_type in ['all', 'pool']:
+            pool_data = r.zrangebyscore('pool:hashrate', start_time, end_time)
+            chart_data['pool_hashrate'] = parse_redis_timeseries(pool_data)
+            
+        if chart_type in ['all', 'miner'] and address:
+            # Get miner hashrate data from Redis
+            miner_key = f'miner:{address}:hashrate'
+            miner_data = r.zrangebyscore(miner_key, start_time, end_time)
+            chart_data['miner_hashrate'] = parse_redis_timeseries(miner_data)
         
         return jsonify(chart_data)
         
