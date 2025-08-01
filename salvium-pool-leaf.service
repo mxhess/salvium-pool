@@ -46,6 +46,20 @@ Environment=MONERO_RANDOMX_FULL_MEM=1
 Environment=RANDOMX_FULL_MEM=1
 Environment=SALVIUM_RANDOMX_FULL_MEM=1
 
+# CPU scheduling
+CPUSchedulingPolicy=1
+CPUSchedulingPriority=50
+IOSchedulingClass=1
+IOSchedulingPriority=4
+
+# Memory optimizations  
+Environment=MALLOC_ARENA_MAX=2
+Environment=MALLOC_MMAP_THRESHOLD_=131072
+
+# Network optimizations
+ExecStartPre=/bin/sh -c 'echo 65536 > /proc/sys/net/core/somaxconn'
+ExecStartPre=/bin/sh -c 'echo 1 > /proc/sys/net/ipv4/tcp_tw_reuse'
+
 [Install]
 WantedBy=multi-user.target
 
