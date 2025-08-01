@@ -345,10 +345,12 @@ static bool abattoir;
 
 extern void rx_slow_hash_free_state();
 
-static shared_template_t *shared_template = NULL;
-static uint64_t local_template_version = 0;
+// Global variables for shared memory
+shared_template_t *shared_template = NULL;
+uint64_t local_template_version = 0;
 static int shm_fd = -1;
 static const char *SHM_NAME = "/salvium_pool_template";
+
 
 #define JSON_GET_OR_ERROR(name, parent, type, client)                \
     json_object *name = NULL;                                        \
@@ -4871,43 +4873,63 @@ int main(int argc, char **argv)
         }
         nproc = config.processes < 0 ? nproc : config.processes;
         log_info("Launching processes: %d", nproc);
+    
+        // Block SIGUSR1 in ALL processes initially
+        sigset_t set;
+        sigemptyset(&set);
+        sigaddset(&set, SIGUSR1);
+        pthread_sigmask(SIG_BLOCK, &set, NULL);
+    
         int pid = 0;
         bool is_parent = true;
-        
-        while (nproc--)
+    
+        // Fork worker processes
+        for (int i = 0; i < nproc; i++)
         {
             pid = fork();
-            if (pid < 1)
+            if (pid == 0)
             {
-                is_parent = false;  // This is a child process
+                // This is a child process - stay blocked on SIGUSR1
+                is_parent = false;
+                log_info("Child process %d started, SIGUSR1 blocked", i);
                 break;
             }
-            if (pid > 0)
-                continue;
+            else if (pid < 0)
+            {
+                log_error("Failed to fork process %d", i);
+                break;
+            }
+            // Parent continues to fork more children
         }
         
-        if (pid > 0)
+        if (is_parent)
         {
-            // Parent process - only handle signals
-            log_info("Parent process waiting for children");
-            while (waitpid(-1, 0, 0) > 0)
-            {}
-            shared_template_cleanup();  // Parent cleans up shared memory
+            // Parent process - unblock SIGUSR1 to handle signals
+            pthread_sigmask(SIG_UNBLOCK, &set, NULL);
+            log_info("Parent process, SIGUSR1 unblocked for signal handling");
+            
+            // Parent should NOT run the main pool loop
+            // Just wait for children and handle signals
+            while (1)
+            {
+                int status;
+                pid_t child_pid = waitpid(-1, &status, 0);
+                if (child_pid > 0)
+                {
+                    log_warn("Child process %d exited", child_pid);
+                    // Optionally restart dead children here
+                }
+            }
+            // Parent cleanup and exit
+            shared_template_cleanup();
             _exit(0);
         }
-        else if (pid == 0 && !is_parent)
-        {
-            // Child process - block SIGUSR1 signal
-            sigset_t set;
-            sigemptyset(&set);
-            sigaddset(&set, SIGUSR1);
-            pthread_sigmask(SIG_BLOCK, &set, NULL);
-            
-            log_info("Child process started, SIGUSR1 blocked");
-        }
+        // Children continue to main pool execution below
     }
     else
+    {
         abattoir = true;
+    }
 
     log_set_udata(&mutex_log);
     log_set_lock(log_lock);
