@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-Salvium Pool Data API Server - Aggregated Stats
-Collects stats from multiple pool nodes and aggregates them
+Unified Salvium Pool Service
+- Collects data from all pool nodes every 30 seconds
+- Stores historical data in Redis
+- Serves API endpoints for the web interface
 """
 
 from flask import Flask, jsonify, request
@@ -9,30 +11,28 @@ from flask_cors import CORS
 import redis
 import json
 import time
+import threading
 from datetime import datetime, timedelta
 import logging
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import threading
 
 # Configuration
 REDIS_HOST = 'core.supportsal.com'
 REDIS_PORT = 6379
 REDIS_DB = 0
 API_PORT = 5000
+TTL = 259200  # 3 days in seconds
 
 # Pool nodes configuration
 POOL_NODES = [
-    'http://core.supportsal.com:4243',    # Upstream - has shares/blocks/balances
+    'http://core.supportsal.com:4243',    # Upstream - has aggregated data
     'http://node1.supportsal.com:4243',   # Downstream - has live miner data
-    # Add new nodes here as you scale:
-    # 'http://node2.supportsal.com:4243',
-    # 'http://node3.supportsal.com:4243',
 ]
 
 # Initialize Flask app
 app = Flask(__name__)
-CORS(app)  # Enable CORS for frontend
+CORS(app)
 
 # Initialize Redis connection
 try:
@@ -47,11 +47,11 @@ except Exception as e:
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Cache for aggregated stats
-stats_cache = {"data": None, "timestamp": 0}
-stats_lock = threading.Lock()
+# Global variables for data collection
+collection_thread = None
+stop_collection = threading.Event()
 
-def fetch_node_stats(node_url, address=None, timeout=3):
+def fetch_node_stats(node_url, address=None, timeout=5):
     """Fetch stats from a single pool node"""
     try:
         headers = {}
@@ -70,17 +70,13 @@ def fetch_node_stats(node_url, address=None, timeout=3):
         logger.warning(f"Failed to fetch from {node_url}: {e}")
         return None
 
-def fetch_node_workers(node_url, address, timeout=3):
+def fetch_node_workers(node_url, address, timeout=5):
     """Fetch workers from a single pool node"""
     try:
         headers = {'Cookie': f'wa={address}'}
         response = requests.get(f'{node_url}/workers', headers=headers, timeout=timeout)
         if response.status_code == 200:
             workers = response.json()
-            # Add node info to each worker
-            for worker in workers:
-                if isinstance(worker, dict):
-                    worker['node'] = node_url
             return workers
         else:
             return []
@@ -88,97 +84,156 @@ def fetch_node_workers(node_url, address, timeout=3):
         logger.warning(f"Failed to fetch workers from {node_url}: {e}")
         return []
 
-def aggregate_pool_stats(node_stats_list, address=None):
-    """Aggregate stats from multiple nodes"""
-    if not node_stats_list:
-        return None
+def store_timeseries_data(key, value):
+    """Store data point in Redis sorted set with TTL"""
+    timestamp = int(time.time())
     
-    # Use the first node's network stats (should be same across all nodes)
-    base_stats = node_stats_list[0]
+    # Store the data point
+    r.zadd(key, {f"{timestamp}:{value}": timestamp})
     
-    aggregated = {
-        # Network stats (same across all nodes)
-        "network_hashrate": base_stats.get("network_hashrate", 0),
-        "network_difficulty": base_stats.get("network_difficulty", 0),
-        "network_height": base_stats.get("network_height", 0),
-        "last_template_fetched": max(node.get("last_template_fetched", 0) for node in node_stats_list),
+    # Set TTL on the sorted set
+    r.expire(key, TTL)
+    
+    # Clean old entries (keep last 3 days)
+    cutoff = timestamp - TTL
+    r.zremrangebyscore(key, "-inf", cutoff)
+
+def collect_pool_data():
+    """Collect and store pool data from all nodes"""
+    logger.info("Collecting pool data from all nodes...")
+    
+    # Collect from each node
+    node_stats = []
+    upstream_node = None
+    
+    with ThreadPoolExecutor(max_workers=len(POOL_NODES)) as executor:
+        future_to_node = {
+            executor.submit(fetch_node_stats, node): node 
+            for node in POOL_NODES
+        }
         
-        # Pool settings (use first node's settings)
-        "payment_threshold": base_stats.get("payment_threshold", 0.1),
-        "pool_fee": base_stats.get("pool_fee", 0.007),
-        "pool_port": base_stats.get("pool_port", 4242),
-        "pool_ssl_port": base_stats.get("pool_ssl_port", 4343),
-        "allow_self_select": base_stats.get("allow_self_select", 1),
-        
-        # Aggregated pool stats
-        "pool_hashrate": sum(node.get("pool_hashrate", 0) for node in node_stats_list),
-        "round_hashes": sum(node.get("round_hashes", 0) for node in node_stats_list),
-        "connected_miners": sum(node.get("connected_miners", 0) for node in node_stats_list),
-        "pool_blocks_found": sum(node.get("pool_blocks_found", 0) for node in node_stats_list),
-        "last_block_found": max(node.get("last_block_found", 0) for node in node_stats_list),
-        
-        # Miner-specific stats (if address provided)
-        "miner_hashrate": sum(node.get("miner_hashrate", 0) for node in node_stats_list),
-        "miner_balance": sum(node.get("miner_balance", 0) for node in node_stats_list),
-        "worker_count": sum(node.get("worker_count", 0) for node in node_stats_list),
-        
-        # Additional info
-        "timestamp": int(time.time()),
-        "active_nodes": len([n for n in node_stats_list if n.get("pool_hashrate", 0) > 0]),
-        "total_nodes": len(node_stats_list),
-        "nodes_info": [{"url": n.get("node_url", "unknown"), 
-                       "hashrate": n.get("pool_hashrate", 0),
-                       "miners": n.get("connected_miners", 0)} for n in node_stats_list]
+        for future in as_completed(future_to_node):
+            node_url = future_to_node[future]
+            try:
+                stats = future.result()
+                if stats:
+                    node_stats.append(stats)
+                    
+                    # Identify upstream node
+                    if 'core.supportsal.com' in node_url:
+                        upstream_node = stats
+                        
+            except Exception as e:
+                logger.error(f"Error collecting from {node_url}: {e}")
+    
+    if not node_stats:
+        logger.error("No node data collected")
+        return
+    
+    # Use upstream node data as authoritative (it has aggregated totals)
+    if upstream_node:
+        pool_data = upstream_node
+        logger.info(f"Using upstream data: hr={pool_data.get('pool_hashrate', 0)}, miners={pool_data.get('connected_miners', 0)}")
+    else:
+        # Fallback: aggregate if no upstream
+        pool_data = aggregate_node_stats(node_stats)
+        logger.info("No upstream node, aggregating manually")
+    
+    # Store pool stats in Redis
+    store_timeseries_data('pool:hashrate', pool_data.get('pool_hashrate', 0))
+    store_timeseries_data('network:hashrate', pool_data.get('network_hashrate', 0))
+    store_timeseries_data('network:difficulty', pool_data.get('network_difficulty', 0))
+    store_timeseries_data('network:height', pool_data.get('network_height', 0))
+    store_timeseries_data('pool:miners', pool_data.get('connected_miners', 0))
+    store_timeseries_data('pool:blocks', pool_data.get('pool_blocks_found', 0))
+    store_timeseries_data('pool:round_hashes', pool_data.get('round_hashes', 0))
+    
+    # Calculate and store effort
+    if pool_data.get('round_hashes') and pool_data.get('network_difficulty'):
+        effort = (pool_data['round_hashes'] / pool_data['network_difficulty']) * 100
+        store_timeseries_data('pool:effort', effort)
+    
+    # Store latest stats JSON for fast API access
+    enhanced_stats = pool_data.copy()
+    enhanced_stats.update({
+        'timestamp': int(time.time()),
+        'active_nodes': len(node_stats),
+        'total_nodes': len(POOL_NODES),
+        'nodes_info': [
+            {
+                'url': node.get('node_url', ''),
+                'hashrate': node.get('pool_hashrate', 0),
+                'miners': node.get('connected_miners', 0)
+            }
+            for node in node_stats
+        ]
+    })
+    
+    r.setex('pool:latest_stats', 300, json.dumps(enhanced_stats))
+    
+    logger.info(f"Stored pool data: hr={pool_data.get('pool_hashrate', 0)}, miners={pool_data.get('connected_miners', 0)}")
+
+def aggregate_node_stats(node_stats):
+    """Aggregate stats from multiple nodes (fallback if no upstream)"""
+    if not node_stats:
+        return {}
+    
+    base = node_stats[0]
+    return {
+        'pool_hashrate': sum(n.get('pool_hashrate', 0) for n in node_stats),
+        'network_hashrate': base.get('network_hashrate', 0),
+        'network_difficulty': base.get('network_difficulty', 0),
+        'network_height': base.get('network_height', 0),
+        'connected_miners': sum(n.get('connected_miners', 0) for n in node_stats),
+        'pool_blocks_found': sum(n.get('pool_blocks_found', 0) for n in node_stats),
+        'round_hashes': sum(n.get('round_hashes', 0) for n in node_stats),
+        'last_template_fetched': max(n.get('last_template_fetched', 0) for n in node_stats),
+        'last_block_found': max(n.get('last_block_found', 0) for n in node_stats),
+        'payment_threshold': base.get('payment_threshold', 0.1),
+        'pool_fee': base.get('pool_fee', 0.007),
+        'pool_port': base.get('pool_port', 4242),
+        'pool_ssl_port': base.get('pool_ssl_port', 4343),
+        'allow_self_select': base.get('allow_self_select', 1)
     }
-    
-    # Calculate miner hashrate stats (aggregate the arrays)
-    miner_hr_stats = [0, 0, 0, 0, 0, 0]
-    for node in node_stats_list:
-        node_hr_stats = node.get("miner_hashrate_stats", [0, 0, 0, 0, 0, 0])
-        for i in range(min(len(miner_hr_stats), len(node_hr_stats))):
-            miner_hr_stats[i] += node_hr_stats[i]
-    
-    aggregated["miner_hashrate_stats"] = miner_hr_stats
-    
-    return aggregated
 
-def get_aggregated_stats_cached(address=None, force_refresh=False):
-    """Get aggregated stats with caching (30 second cache)"""
-    with stats_lock:
-        now = time.time()
+def data_collection_worker():
+    """Background thread that collects data every 30 seconds"""
+    logger.info("Starting data collection worker...")
+    
+    while not stop_collection.is_set():
+        try:
+            collect_pool_data()
+        except Exception as e:
+            logger.error(f"Error in data collection: {e}")
         
-        # Check if we need to refresh (cache expired or forced)
-        if force_refresh or not stats_cache["data"] or (now - stats_cache["timestamp"]) > 30:
-            # Fetch from all nodes concurrently
-            node_stats = []
-            
-            with ThreadPoolExecutor(max_workers=len(POOL_NODES)) as executor:
-                future_to_node = {
-                    executor.submit(fetch_node_stats, node, address): node 
-                    for node in POOL_NODES
-                }
-                
-                for future in as_completed(future_to_node):
-                    node_url = future_to_node[future]
-                    try:
-                        stats = future.result()
-                        if stats:
-                            node_stats.append(stats)
-                    except Exception as e:
-                        logger.error(f"Error fetching from {node_url}: {e}")
-            
-            if node_stats:
-                aggregated = aggregate_pool_stats(node_stats, address)
-                if not address:  # Only cache pool-wide stats, not miner-specific
-                    stats_cache["data"] = aggregated
-                    stats_cache["timestamp"] = now
-                return aggregated
-            else:
-                logger.error("Failed to fetch stats from any nodes")
-                return stats_cache["data"]  # Return cached data if available
-        
-        return stats_cache["data"]
+        # Wait 30 seconds or until stop signal
+        if stop_collection.wait(30):
+            break
+    
+    logger.info("Data collection worker stopped")
 
+def start_data_collection():
+    """Start the background data collection thread"""
+    global collection_thread
+    
+    if collection_thread and collection_thread.is_alive():
+        return
+    
+    stop_collection.clear()
+    collection_thread = threading.Thread(target=data_collection_worker, daemon=True)
+    collection_thread.start()
+    logger.info("Data collection thread started")
+
+def stop_data_collection():
+    """Stop the background data collection thread"""
+    global collection_thread
+    
+    stop_collection.set()
+    if collection_thread and collection_thread.is_alive():
+        collection_thread.join(timeout=5)
+    logger.info("Data collection thread stopped")
+
+# Utility functions
 def parse_redis_timeseries(data):
     """Parse Redis sorted set data into timestamps and values"""
     result = []
@@ -198,13 +253,14 @@ def get_time_range(hours=8):
     start = now - (hours * 3600)
     return start, now
 
+# API Endpoints
 @app.route('/api/health')
 def health_check():
     """Health check endpoint"""
     try:
         r.ping()
         
-        # Check how many nodes are responding
+        # Check pool nodes
         responding_nodes = 0
         for node in POOL_NODES:
             try:
@@ -217,6 +273,7 @@ def health_check():
         return jsonify({
             "status": "healthy", 
             "redis": "connected",
+            "data_collection": "active" if collection_thread and collection_thread.is_alive() else "inactive",
             "pool_nodes": {
                 "total": len(POOL_NODES),
                 "responding": responding_nodes,
@@ -228,58 +285,47 @@ def health_check():
 
 @app.route('/api/stats')
 def get_current_stats():
-    """Get current aggregated pool statistics"""
+    """Get current pool statistics or miner-specific stats"""
     try:
-        # Check if address is provided
         address = request.args.get('address') or request.cookies.get('wa')
         
         if address:
-            # For miner-specific requests, query nodes in real-time
+            # Miner-specific request - query nodes in real-time
             return get_miner_stats(address)
         else:
-            # For pool stats, use Redis cache first, then fallback to live data
-            try:
-                redis_stats = r.get('pool:latest_stats')
-                if redis_stats:
-                    stats_data = json.loads(redis_stats)
-                    stats_data['source'] = 'redis_cache'
-                    return jsonify(stats_data)
-            except Exception as e:
-                logger.warning(f"Redis cache unavailable: {e}")
-            
-            # Fallback to live aggregated stats
-            stats = get_aggregated_stats_cached()
-            if stats:
-                stats['source'] = 'live_aggregated'
-                return jsonify(stats)
+            # Pool stats - use cached Redis data
+            latest_stats = r.get('pool:latest_stats')
+            if latest_stats:
+                stats_data = json.loads(latest_stats)
+                stats_data['source'] = 'redis_cache'
+                return jsonify(stats_data)
             else:
-                return jsonify({"error": "No stats available from any pool nodes"}), 503
+                return jsonify({"error": "No pool stats available"}), 503
                 
     except Exception as e:
-        logger.error(f"Error fetching current stats: {e}")
+        logger.error(f"Error fetching stats: {e}")
         return jsonify({"error": "Failed to fetch stats"}), 500
 
 def get_miner_stats(address):
-    """Get miner-specific stats by querying all nodes in real-time"""
+    """Get miner-specific stats by querying nodes in real-time"""
     try:
-        # Start with pool stats from Redis/cache
+        # Get pool stats from cache
+        pool_data = {}
         try:
-            redis_stats = r.get('pool:latest_stats')
-            if redis_stats:
-                pool_data = json.loads(redis_stats)
-            else:
-                pool_data = get_aggregated_stats_cached() or {}
+            latest_stats = r.get('pool:latest_stats')
+            if latest_stats:
+                pool_data = json.loads(latest_stats)
         except:
-            pool_data = get_aggregated_stats_cached() or {}
+            pass
         
-        # Query all nodes for miner-specific data
+        # Query nodes for miner data
         total_miner_hashrate = 0
         total_miner_balance = 0
+        downstream_worker_count = 0
         miner_hr_stats = [0, 0, 0, 0, 0, 0]
         found_on_nodes = []
         
-        # Only get worker count from downstream nodes (where miners actually connect)
-        downstream_worker_count = 0
+        logger.info(f"Querying nodes for miner {address[:16]}...")
         
         with ThreadPoolExecutor(max_workers=len(POOL_NODES)) as executor:
             future_to_node = {
@@ -291,32 +337,39 @@ def get_miner_stats(address):
                 node_url = future_to_node[future]
                 try:
                     stats = future.result()
-                    if stats and (stats.get('miner_hashrate', 0) > 0 or 
-                                stats.get('miner_balance', 0) > 0 or 
-                                stats.get('worker_count', 0) > 0):
+                    if stats:
+                        logger.info(f"Node {node_url}: hr={stats.get('miner_hashrate', 0)}, workers={stats.get('worker_count', 0)}")
                         
-                        total_miner_hashrate += stats.get('miner_hashrate', 0)
-                        total_miner_balance += stats.get('miner_balance', 0)
-                        
-                        # Only count workers from downstream nodes (not core)
-                        if 'core.supportsal.com' not in node_url:
-                            downstream_worker_count += stats.get('worker_count', 0)
-                        
-                        # Aggregate hashrate stats arrays
-                        node_hr_stats = stats.get('miner_hashrate_stats', [0, 0, 0, 0, 0, 0])
-                        for i in range(min(len(miner_hr_stats), len(node_hr_stats))):
-                            miner_hr_stats[i] += node_hr_stats[i]
-                        
-                        found_on_nodes.append(node_url)
+                        if (stats.get('miner_hashrate', 0) > 0 or 
+                            stats.get('miner_balance', 0) > 0 or 
+                            stats.get('worker_count', 0) > 0):
+                            
+                            total_miner_hashrate += stats.get('miner_hashrate', 0)
+                            total_miner_balance += stats.get('miner_balance', 0)
+                            
+                            # Only count workers from downstream nodes (not core)
+                            if 'core.supportsal.com' not in node_url:
+                                downstream_worker_count += stats.get('worker_count', 0)
+                                logger.info(f"Using worker count from downstream {node_url}: {stats.get('worker_count', 0)}")
+                            else:
+                                logger.info(f"Ignoring worker count from upstream {node_url}: {stats.get('worker_count', 0)}")
+                            
+                            # Aggregate hashrate stats
+                            node_hr_stats = stats.get('miner_hashrate_stats', [0, 0, 0, 0, 0, 0])
+                            for i in range(min(len(miner_hr_stats), len(node_hr_stats))):
+                                miner_hr_stats[i] += node_hr_stats[i]
+                            
+                            found_on_nodes.append(node_url)
                         
                 except Exception as e:
                     logger.error(f"Error fetching miner stats from {node_url}: {e}")
         
-        # If no miner data found, return error
+        logger.info(f"Miner results: hr={total_miner_hashrate}, workers={downstream_worker_count}")
+        
         if total_miner_hashrate == 0 and total_miner_balance == 0 and downstream_worker_count == 0:
             return jsonify({"error": "Miner not found"}), 404
         
-        # Combine pool stats with miner stats
+        # Combine pool and miner data
         result = pool_data.copy()
         result.update({
             "miner_hashrate": total_miner_hashrate,
@@ -335,17 +388,19 @@ def get_miner_stats(address):
 
 @app.route('/api/workers')
 def get_workers():
-    """Get workers for an address from downstream nodes only"""
+    """Get workers for an address from downstream nodes"""
     try:
         address = request.args.get('address') or request.cookies.get('wa')
         
         if not address:
             return jsonify({"error": "No address provided"}), 400
         
-        all_workers = []
+        logger.info(f"Fetching workers for address {address[:16]}...")
         
-        # Only fetch workers from downstream nodes (where miners actually connect)
+        all_workers = []
         downstream_nodes = [node for node in POOL_NODES if 'core.supportsal.com' not in node]
+        
+        logger.info(f"Checking downstream nodes: {downstream_nodes}")
         
         with ThreadPoolExecutor(max_workers=len(downstream_nodes)) as executor:
             future_to_node = {
@@ -357,120 +412,94 @@ def get_workers():
                 node_url = future_to_node[future]
                 try:
                     workers = future.result()
-                    if workers:
-                        # Parse the C format workers: ["name", hashrate, "", shares]
-                        for worker in workers:
-                            if isinstance(worker, list) and len(worker) >= 4:
-                                worker_name = worker[0] if worker[0] else "Unknown"
-                                worker_hashrate = worker[1] if len(worker) > 1 else 0
-                                worker_shares = worker[3] if len(worker) > 3 else 0
+                    logger.info(f"Workers from {node_url}: {workers}")
+                    
+                    if workers and isinstance(workers, list):
+                        # The C API returns a flat list of name-value pairs:
+                        # ['name1', value1, 'name2', value2, 'name3', value3, ...]
+                        
+                        # Process pairs
+                        for i in range(0, len(workers), 2):
+                            if i + 1 < len(workers):
+                                worker_name = workers[i] if workers[i] else f"Worker-{i//2 + 1}"
+                                worker_value = workers[i + 1] if isinstance(workers[i + 1], (int, float)) else 0
                                 
-                                # Create proper worker object
+                                # The value could be hashrate or shares, let's assume it's hashrate for now
                                 worker_obj = {
                                     "identifier": worker_name,
                                     "name": worker_name,
-                                    "hashrate": worker_hashrate,
-                                    "shares": worker_shares,
-                                    "timestamp": int(time.time()),  # Current time as last seen
+                                    "hashrate": worker_value,
+                                    "shares": 0,  # We don't have shares data in this format
+                                    "timestamp": int(time.time()),
                                     "node": node_url
                                 }
                                 all_workers.append(worker_obj)
+                                logger.info(f"Added worker: {worker_name} with value: {worker_value}")
                                 
                 except Exception as e:
                     logger.error(f"Error fetching workers from {node_url}: {e}")
         
+        logger.info(f"Total workers found: {len(all_workers)}")
         return jsonify(all_workers)
         
     except Exception as e:
         logger.error(f"Error fetching workers: {e}")
         return jsonify({"error": "Failed to fetch workers"}), 500
 
-@app.route('/api/nodes')
-def get_nodes_status():
-    """Get status of all pool nodes"""
-    try:
-        nodes_status = []
-        
-        with ThreadPoolExecutor(max_workers=len(POOL_NODES)) as executor:
-            future_to_node = {
-                executor.submit(fetch_node_stats, node): node 
-                for node in POOL_NODES
-            }
-            
-            for future in as_completed(future_to_node):
-                node_url = future_to_node[future]
-                try:
-                    stats = future.result()
-                    if stats:
-                        nodes_status.append({
-                            "url": node_url,
-                            "status": "online",
-                            "hashrate": stats.get("pool_hashrate", 0),
-                            "miners": stats.get("connected_miners", 0),
-                            "blocks_found": stats.get("pool_blocks_found", 0),
-                            "last_seen": int(time.time())
-                        })
-                    else:
-                        nodes_status.append({
-                            "url": node_url,
-                            "status": "offline",
-                            "hashrate": 0,
-                            "miners": 0,
-                            "blocks_found": 0,
-                            "last_seen": 0
-                        })
-                except Exception as e:
-                    nodes_status.append({
-                        "url": node_url,
-                        "status": "error",
-                        "error": str(e),
-                        "hashrate": 0,
-                        "miners": 0,
-                        "blocks_found": 0,
-                        "last_seen": 0
-                    })
-        
-        return jsonify(nodes_status)
-        
-    except Exception as e:
-        logger.error(f"Error fetching nodes status: {e}")
-        return jsonify({"error": "Failed to fetch nodes status"}), 500
-
-# Keep your existing chart endpoints...
 @app.route('/api/charts')
 def get_chart_data():
-    """Get chart data for the specified time range"""
+    """Get chart data - live data for immediate charts, Redis for historical"""
     try:
         hours = int(request.args.get('hours', 8))
-        start_time, end_time = get_time_range(hours)
-        chart_type = request.args.get('type', 'all')
+        chart_type = request.args.get('type', 'pool')
         address = request.args.get('address', '')
         
         chart_data = {}
         
-        if chart_type in ['all', 'network']:
-            network_data = r.zrangebyscore('network:hashrate', start_time, end_time)
-            chart_data['network_hashrate'] = parse_redis_timeseries(network_data)
+        if chart_type in ['all', 'miner'] and address:
+            # Get live miner hashrate data (immediate chart)
+            with live_data_lock:
+                if address in live_hashrate_data['miners']:
+                    live_data = live_hashrate_data['miners'][address]
+                    chart_data['miner_hashrate'] = [[t, h] for t, h in live_data]
+                else:
+                    chart_data['miner_hashrate'] = []
             
-            difficulty_data = r.zrangebyscore('network:difficulty', start_time, end_time)
-            chart_data['network_difficulty'] = parse_redis_timeseries(difficulty_data)
+            logger.info(f"Live miner chart data points: {len(chart_data.get('miner_hashrate', []))}")
         
         if chart_type in ['all', 'pool']:
-            pool_data = r.zrangebyscore('pool:hashrate', start_time, end_time)
-            chart_data['pool_hashrate'] = parse_redis_timeseries(pool_data)
+            # Get live pool hashrate data (immediate chart)
+            with live_data_lock:
+                live_data = live_hashrate_data['pool']
+                chart_data['pool_hashrate'] = [[t, h] for t, h in live_data]
             
-            effort_data = r.zrangebyscore('pool:effort', start_time, end_time)
-            chart_data['pool_effort'] = parse_redis_timeseries(effort_data)
+            logger.info(f"Live pool chart data points: {len(chart_data.get('pool_hashrate', []))}")
             
-            miners_data = r.zrangebyscore('pool:miners', start_time, end_time)
-            chart_data['pool_miners'] = parse_redis_timeseries(miners_data)
+            # Also try to get historical data from Redis for longer charts
+            if hours > 1:  # For longer time ranges, supplement with Redis data
+                start_time, end_time = get_time_range(hours)
+                
+                redis_data = r.zrangebyscore('pool:hashrate', start_time, end_time)
+                redis_parsed = parse_redis_timeseries(redis_data)
+                
+                if redis_parsed:
+                    # Merge live and historical data, removing duplicates
+                    combined_data = redis_parsed + chart_data['pool_hashrate']
+                    # Sort by timestamp and remove duplicates
+                    seen_timestamps = set()
+                    unique_data = []
+                    for timestamp, value in sorted(combined_data):
+                        if timestamp not in seen_timestamps:
+                            unique_data.append([timestamp, value])
+                            seen_timestamps.add(timestamp)
+                    
+                    chart_data['pool_hashrate'] = unique_data[-100:]  # Keep last 100 points
         
-        if chart_type in ['all', 'miner'] and address:
-            miner_data = r.zrangebyscore(f'miner:{address}:hashrate', start_time, end_time)
-            chart_data['miner_hashrate'] = parse_redis_timeseries(miner_data)
-            
-            balance_data = r.zrangebyscore(f'miner:{address}:balance', start_time, end_time)
-            chart_data['miner_balance'] = parse_redis_timeseries(balance_data)
+        if chart_type in ['all', 'network']:
+            # Network data from Redis only
+            start_time, end_time = get_time_range(hours)
+            network_data = r.zrangebyscore('network:hashrate', start_time, end_time)
+            chart_data['network_hashrate'] = parse_redis_timeseries(network_data)
         
         return jsonify(chart_data)
         
@@ -480,41 +509,14 @@ def get_chart_data():
 
 @app.route('/api/blocks')
 def get_blocks_history():
-    """Get blocks history with detailed information"""
+    """Get blocks history"""
     try:
-        hours = int(request.args.get('hours', 24))
-        start_time, end_time = get_time_range(hours)
-        
-        blocks_detailed = r.zrangebyscore('pool:blocks_detailed', start_time, end_time)
-        
-        if blocks_detailed:
-            blocks = []
-            for block_data in blocks_detailed:
-                try:
-                    block = json.loads(block_data.split(':', 1)[1])
-                    blocks.append(block)
-                except:
-                    continue
-            return jsonify(blocks)
-        else:
-            blocks_data = r.zrangebyscore('pool:blocks', start_time, end_time)
-            blocks_timeline = parse_redis_timeseries(blocks_data)
-            
-            blocks = []
-            for timestamp, height in blocks_timeline:
-                blocks.append({
-                    "ts": int(timestamp),
-                    "height": int(height),
-                    "reward": 20.0,
-                    "hash": "",
-                    "difficulty": 0
-                })
-            
-            return jsonify(blocks)
+        # For now, return empty array since we haven't found blocks yet
+        return jsonify([])
         
     except Exception as e:
         logger.error(f"Error fetching blocks data: {e}")
-        return jsonify({"error": "Failed to fetch blocks data"}), 500
+        return jsonify([])
 
 @app.errorhandler(404)
 def not_found(error):
@@ -525,15 +527,26 @@ def internal_error(error):
     return jsonify({"error": "Internal server error"}), 500
 
 if __name__ == '__main__':
-    print(f"Starting Salvium Pool Aggregated API Server on port {API_PORT}")
+    print(f"Starting Unified Salvium Pool Service on port {API_PORT}")
     print(f"Pool nodes: {POOL_NODES}")
+    print(f"Data collection: Every 30 seconds")
+    print(f"Redis storage: {REDIS_HOST}:{REDIS_PORT}")
+    
+    # Start data collection
+    start_data_collection()
+    
+    # Collect initial data
+    collect_pool_data()
+    
     print(f"Endpoints available:")
     print(f"  GET /api/health - Health check")
-    print(f"  GET /api/stats - Aggregated pool stats")
-    print(f"  GET /api/workers - Workers from all nodes")
-    print(f"  GET /api/nodes - Node status")
-    print(f"  GET /api/charts - Chart data")
+    print(f"  GET /api/stats - Pool stats (cached) or miner stats (live)")
+    print(f"  GET /api/workers - Workers from downstream nodes")
+    print(f"  GET /api/charts - Chart data from Redis")
     print(f"  GET /api/blocks - Blocks history")
     
-    app.run(host='127.0.0.1', port=API_PORT, debug=False)
+    try:
+        app.run(host='127.0.0.1', port=API_PORT, debug=False, threaded=True)
+    finally:
+        stop_data_collection()
 
