@@ -40,6 +40,9 @@ Environment=HOME=/home/pooluser
 Environment=USER=pooluser
 Environment=SALVIUM_ROOT=/home/pooluser/salvium_io
 Environment=SALVIUM_BUILD_ROOT=/home/pooluser/salvium_io/build/Linux/main/release
+Environment=MONERO_RANDOMX_FULL_MEM=1
+Environment=RANDOMX_FULL_MEM=1
+Environment=SALVIUM_RANDOMX_FULL_MEM=1
 
 [Install]
 WantedBy=multi-user.target

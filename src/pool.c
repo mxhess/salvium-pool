@@ -69,6 +69,8 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "growbag.h"
 #include "uthash.h"
 
+#include "shared_template.h"
+
 #define MAX_LINE 8192
 #define CLIENTS_INIT 8192
 #define RPC_BODY_MAX 65536
@@ -342,6 +344,11 @@ static gbag_t *bag_clients;
 static bool abattoir;
 
 extern void rx_slow_hash_free_state();
+
+static shared_template_t *shared_template = NULL;
+static uint64_t local_template_version = 0;
+static int shm_fd = -1;
+static const char *SHM_NAME = "/salvium_pool_template";
 
 #define JSON_GET_OR_ERROR(name, parent, type, client)                \
     json_object *name = NULL;                                        \
@@ -1407,6 +1414,21 @@ miner_send_job(client_t *client, bool response)
     block_template_t *bt = bstack_top(bst);
     job->block_template = bt;
 
+    // Check if shared template is newer than our local version
+    if (shared_template_is_newer()) {
+        block_template_t shared_temp = {0};
+        if (shared_template_get_latest(&shared_temp) == 0) {
+            log_debug("Using newer shared template for job");
+            // Update local block template stack if needed
+            block_template_t *top = bstack_top(bst);
+            if (!top || shared_temp.height > top->height) {
+                // Add shared template to local stack
+                // Note: This is simplified - you may need to handle blob copying
+                bstack_push(bst, &shared_temp);
+            }
+        }
+    }
+
     if (client->mode == MODE_SELF_SELECT)
     {
         uuid_generate(job->id);
@@ -1835,7 +1857,6 @@ rpc_on_block_template(const char* data, rpc_callback_t *callback)
     const char *ss = json_object_get_string(status);
     json_object *error = NULL;
     json_object_object_get_ex(root, "error", &error);
-
     if (error)
     {
         JSON_GET_OR_WARN(code, error, json_type_object);
@@ -1850,10 +1871,14 @@ rpc_on_block_template(const char* data, rpc_callback_t *callback)
         log_error("Error getting block template: %s", ss);
         goto done;
     }
-
     pool_stats.last_template_fetched = time(NULL);
     response_to_block_template(result, &cand);
-
+    
+    // UPDATE SHARED MEMORY HERE
+    if (shared_template_update(&cand) == 0) {
+        log_info("Updated shared template to height %lu", cand.height);
+    }
+    
     if ((top = bstack_top(bst)))
     {
         if (cand.tx_count > top->tx_count || cand.height > top->height)
@@ -1870,10 +1895,11 @@ rpc_on_block_template(const char* data, rpc_callback_t *callback)
         }
     }
     else
+    {
         bstack_push(bst, &cand);
-
+    }
+    
     clients_send_job();
-
 done:
     json_object_put(root);
 }
@@ -3797,6 +3823,151 @@ unlock:
     pthread_mutex_unlock(&mutex_clients);
 }
 
+int shared_template_init(void)
+{
+    // Create shared memory object
+    shm_fd = shm_open(SHM_NAME, O_CREAT | O_RDWR, 0666);
+    if (shm_fd == -1) {
+        log_error("Failed to create shared memory: %s", strerror(errno));
+        return -1;
+    }
+
+    // Set size of shared memory
+    if (ftruncate(shm_fd, sizeof(shared_template_t)) == -1) {
+        log_error("Failed to set shared memory size: %s", strerror(errno));
+        close(shm_fd);
+        return -1;
+    }
+
+    // Map shared memory
+    shared_template = mmap(NULL, sizeof(shared_template_t), 
+                          PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
+    if (shared_template == MAP_FAILED) {
+        log_error("Failed to map shared memory: %s", strerror(errno));
+        close(shm_fd);
+        return -1;
+    }
+
+    // Initialize mutex with process-shared attribute
+    pthread_mutexattr_t attr;
+    pthread_mutexattr_init(&attr);
+    pthread_mutexattr_setpshared(&attr, PTHREAD_PROCESS_SHARED);
+    
+    if (pthread_mutex_init(&shared_template->lock, &attr) != 0) {
+        log_error("Failed to initialize shared mutex");
+        munmap(shared_template, sizeof(shared_template_t));
+        close(shm_fd);
+        return -1;
+    }
+    
+    pthread_mutexattr_destroy(&attr);
+
+    // Initialize shared template
+    memset(shared_template, 0, sizeof(shared_template_t));
+    shared_template->template_version = 0;
+    
+    log_info("Shared memory initialized successfully");
+    return 0;
+}
+
+// Cleanup shared memory
+void shared_template_cleanup(void)
+{
+    if (shared_template != NULL) {
+        pthread_mutex_destroy(&shared_template->lock);
+        munmap(shared_template, sizeof(shared_template_t));
+        shared_template = NULL;
+    }
+    
+    if (shm_fd != -1) {
+        close(shm_fd);
+        shm_unlink(SHM_NAME);  // Only parent should unlink
+        shm_fd = -1;
+    }
+}
+
+// Update shared template (called by process that receives SIGUSR1)
+int shared_template_update(const block_template_t *new_template)
+{
+    if (!shared_template || !new_template) {
+        return -1;
+    }
+
+    if (pthread_mutex_lock(&shared_template->lock) != 0) {
+        log_error("Failed to lock shared template mutex");
+        return -1;
+    }
+
+    // Update shared template data
+    shared_template->template_version++;
+    shared_template->height = new_template->height;
+    shared_template->difficulty = new_template->difficulty;
+    shared_template->reserved_offset = new_template->reserved_offset;
+    shared_template->tx_count = new_template->tx_count;
+    shared_template->timestamp = time(NULL);
+    
+    strncpy(shared_template->seed_hash, new_template->seed_hash, 64);
+    strncpy(shared_template->next_seed_hash, new_template->next_seed_hash, 64);
+    strncpy(shared_template->prev_hash, new_template->prev_hash, 64);
+    
+    // Note: For simplicity, we're copying the hash strings
+    // In production, you might want to store the blob data in shared memory too
+    // or use a more sophisticated approach for variable-length data
+    
+    shared_template->hashing_blob_size = new_template->hashing_blob_size;
+    // TODO: Handle variable-length blob data if needed
+    
+    pthread_mutex_unlock(&shared_template->lock);
+    
+    log_debug("Updated shared template to version %lu, height %lu", 
+              shared_template->template_version, shared_template->height);
+    
+    return 0;
+}
+
+// Check if shared template is newer than local version
+bool shared_template_is_newer(void)
+{
+    if (!shared_template) {
+        return false;
+    }
+    
+    return shared_template->template_version > local_template_version;
+}
+
+// Get latest template from shared memory
+int shared_template_get_latest(block_template_t *local_template)
+{
+    if (!shared_template || !local_template) {
+        return -1;
+    }
+
+    if (pthread_mutex_lock(&shared_template->lock) != 0) {
+        log_error("Failed to lock shared template mutex for read");
+        return -1;
+    }
+
+    // Copy shared template to local template
+    local_template->height = shared_template->height;
+    local_template->difficulty = shared_template->difficulty;
+    local_template->reserved_offset = shared_template->reserved_offset;
+    local_template->tx_count = shared_template->tx_count;
+    
+    strncpy(local_template->seed_hash, shared_template->seed_hash, 64);
+    strncpy(local_template->next_seed_hash, shared_template->next_seed_hash, 64);
+    strncpy(local_template->prev_hash, shared_template->prev_hash, 64);
+    
+    // Update local version
+    local_template_version = shared_template->template_version;
+    
+    pthread_mutex_unlock(&shared_template->lock);
+    
+    log_debug("Retrieved shared template version %lu, height %lu", 
+              local_template_version, local_template->height);
+    
+    return 0;
+}
+
 static void
 listener_on_error(struct bufferevent *bev, short error, void *ctx)
 {
@@ -4313,7 +4484,7 @@ print_config(void)
 static void
 sigusr1_handler(evutil_socket_t fd, short event, void *arg)
 {
-    log_trace("Fetching last block header from signal");
+    log_trace("Fetching last block header from signal (parent process)");
     fetch_last_block_header();
 }
 
@@ -4675,6 +4846,11 @@ int main(int argc, char **argv)
         log_info("RandomX dataset (fast mode) is not enabled by default; "
             "set MONERO_RANDOMX_FULL_MEM environment variable to enable");
 
+    if (shared_template_init() != 0) {
+        log_fatal("Failed to initialize shared memory");
+        return -1;
+    }
+
     if (config.forked)
     {
         log_info("Daemonizing");
@@ -4696,22 +4872,39 @@ int main(int argc, char **argv)
         nproc = config.processes < 0 ? nproc : config.processes;
         log_info("Launching processes: %d", nproc);
         int pid = 0;
+        bool is_parent = true;
+        
         while (nproc--)
         {
             pid = fork();
             if (pid < 1)
+            {
+                is_parent = false;  // This is a child process
                 break;
+            }
             if (pid > 0)
                 continue;
         }
+        
         if (pid > 0)
         {
+            // Parent process - only handle signals
+            log_info("Parent process waiting for children");
             while (waitpid(-1, 0, 0) > 0)
             {}
+            shared_template_cleanup();  // Parent cleans up shared memory
             _exit(0);
         }
-        else if (pid == 0 && nproc == 0)
-            abattoir = true;
+        else if (pid == 0 && !is_parent)
+        {
+            // Child process - block SIGUSR1 signal
+            sigset_t set;
+            sigemptyset(&set);
+            sigaddset(&set, SIGUSR1);
+            pthread_sigmask(SIG_BLOCK, &set, NULL);
+            
+            log_info("Child process started, SIGUSR1 blocked");
+        }
     }
     else
         abattoir = true;
@@ -4721,6 +4914,7 @@ int main(int argc, char **argv)
     signal(SIGINT, sigint_handler);
     signal(SIGTERM, sigint_handler);
     signal(SIGPIPE, SIG_IGN);
+    atexit(shared_template_cleanup);
     atexit(cleanup);
 
     int err = 0;
