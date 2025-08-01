@@ -13,11 +13,12 @@ Group=pooluser
 WorkingDirectory=/home/pooluser/pool
 ExecStart=/home/pooluser/pool/salvium-pool -c /home/pooluser/pool/pool.conf
 ExecReload=/bin/kill -HUP $MAINPID
-Restart=always
 RestartSec=10
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=salvium-pool
+RestartPreventExitStatus=10
+Restart=on-failure
 
 # Security settings
 #NoNewPrivileges=true

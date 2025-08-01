@@ -3266,7 +3266,7 @@ miner_on_block_template(json_object *message, client_t *client)
     uint8_t pow_variant = major_version >= 7 ? major_version - 6 : 0;
     log_trace("Variant: %u", pow_variant);
 
-    if (pow_variant >= 6)
+    if (pow_variant >= 3)
     {
         JSON_GET_OR_ERROR(seed_hash, params, json_type_string, client);
         JSON_GET_OR_WARN(next_seed_hash, params, json_type_string);
@@ -3462,7 +3462,7 @@ miner_on_submit(json_object *message, client_t *client)
         goto post_hash;
     }
 
-    if (pow_variant >= 6)
+    if (pow_variant >= 3)
     {
         unsigned char seed_hash[32] = {0};
         hex_to_bin(bt->seed_hash, seed_hash, 32);
