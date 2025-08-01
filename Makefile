@@ -134,7 +134,7 @@ STATIC_LIBS = \
   -luuid -lboost_system -lboost_date_time -lboost_chrono \
   -lboost_filesystem -lboost_thread -lboost_regex \
   -lboost_serialization -lboost_program_options \
-  -lhidapi-libusb -levent_core -levent_pthreads \
+  -levent_core -levent_pthreads \
   -levent -levent_extra -ljson-c -lssl -lcrypto -lsodium \
   -Wl,-Bdynamic \
   -lpthread -ldl

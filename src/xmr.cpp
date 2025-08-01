@@ -58,15 +58,15 @@ using namespace config;
 static int nettype_from_prefix(uint8_t *nettype, uint64_t prefix)
 {
     static const struct { cryptonote::network_type type; uint64_t prefix; } nettype_prefix[] = {
-        { MAINNET, CRYPTONOTE_PUBLIC_ADDRESS_BASE58_PREFIX },
-        { MAINNET, CRYPTONOTE_PUBLIC_INTEGRATED_ADDRESS_BASE58_PREFIX },
-        { MAINNET, CRYPTONOTE_PUBLIC_SUBADDRESS_BASE58_PREFIX },
-        { TESTNET, testnet::CRYPTONOTE_PUBLIC_ADDRESS_BASE58_PREFIX },
-        { TESTNET, testnet::CRYPTONOTE_PUBLIC_INTEGRATED_ADDRESS_BASE58_PREFIX },
-        { TESTNET, testnet::CRYPTONOTE_PUBLIC_SUBADDRESS_BASE58_PREFIX },
-        { STAGENET, stagenet::CRYPTONOTE_PUBLIC_ADDRESS_BASE58_PREFIX },
-        { STAGENET, stagenet::CRYPTONOTE_PUBLIC_INTEGRATED_ADDRESS_BASE58_PREFIX },
-        { STAGENET, stagenet::CRYPTONOTE_PUBLIC_SUBADDRESS_BASE58_PREFIX }
+        { MAINNET, 0x3ef318 },      // Salvium "SaLv"
+        { MAINNET, 0x55ef318 },     // Salvium "SaLvi" 
+        { MAINNET, 0xf5ef318 },     // Salvium "SaLvs"
+        { TESTNET, 0x15beb318 },    // Salvium "SaLvT"
+        { TESTNET, 0xd055eb318 },   // Salvium "SaLvTi"
+        { TESTNET, 0xa59eb318 },    // Salvium "SaLvTs"
+        { STAGENET, 0x149eb318 },   // Salvium "SaLvS"
+        { STAGENET, 0xf343eb318 },  // Salvium "SaLvSi"
+        { STAGENET, 0x2d47eb318 }   // Salvium "SaLvSs"
     };
     int rv = XMR_MISMATCH_ERROR;
     for (auto ntp : nettype_prefix)

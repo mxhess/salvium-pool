@@ -3633,6 +3633,7 @@ miner_on_read(struct bufferevent *bev, void *ctx)
     while ((line = evbuffer_readln(input, &n, EVBUFFER_EOL_LF)))
     {
         json_object *message = json_tokener_parse(line);
+	log_debug("Raw input from [%s:%d]: '%s'", client->host, client->port, line);
         if (!message)
         {
             free(line);
