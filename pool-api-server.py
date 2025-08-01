@@ -275,9 +275,11 @@ def get_miner_stats(address):
         # Query all nodes for miner-specific data
         total_miner_hashrate = 0
         total_miner_balance = 0
-        total_worker_count = 0
         miner_hr_stats = [0, 0, 0, 0, 0, 0]
         found_on_nodes = []
+        
+        # Only get worker count from downstream nodes (where miners actually connect)
+        downstream_worker_count = 0
         
         with ThreadPoolExecutor(max_workers=len(POOL_NODES)) as executor:
             future_to_node = {
@@ -295,7 +297,10 @@ def get_miner_stats(address):
                         
                         total_miner_hashrate += stats.get('miner_hashrate', 0)
                         total_miner_balance += stats.get('miner_balance', 0)
-                        total_worker_count += stats.get('worker_count', 0)
+                        
+                        # Only count workers from downstream nodes (not core)
+                        if 'core.supportsal.com' not in node_url:
+                            downstream_worker_count += stats.get('worker_count', 0)
                         
                         # Aggregate hashrate stats arrays
                         node_hr_stats = stats.get('miner_hashrate_stats', [0, 0, 0, 0, 0, 0])
@@ -308,7 +313,7 @@ def get_miner_stats(address):
                     logger.error(f"Error fetching miner stats from {node_url}: {e}")
         
         # If no miner data found, return error
-        if total_miner_hashrate == 0 and total_miner_balance == 0 and total_worker_count == 0:
+        if total_miner_hashrate == 0 and total_miner_balance == 0 and downstream_worker_count == 0:
             return jsonify({"error": "Miner not found"}), 404
         
         # Combine pool stats with miner stats
@@ -316,7 +321,7 @@ def get_miner_stats(address):
         result.update({
             "miner_hashrate": total_miner_hashrate,
             "miner_balance": total_miner_balance,
-            "worker_count": total_worker_count,
+            "worker_count": downstream_worker_count,  # Use only downstream count
             "miner_hashrate_stats": miner_hr_stats,
             "found_on_nodes": found_on_nodes,
             "source": "live_miner_query"
@@ -330,7 +335,7 @@ def get_miner_stats(address):
 
 @app.route('/api/workers')
 def get_workers():
-    """Get workers for an address from all nodes"""
+    """Get workers for an address from downstream nodes only"""
     try:
         address = request.args.get('address') or request.cookies.get('wa')
         
@@ -339,11 +344,13 @@ def get_workers():
         
         all_workers = []
         
-        # Fetch workers from all nodes concurrently
-        with ThreadPoolExecutor(max_workers=len(POOL_NODES)) as executor:
+        # Only fetch workers from downstream nodes (where miners actually connect)
+        downstream_nodes = [node for node in POOL_NODES if 'core.supportsal.com' not in node]
+        
+        with ThreadPoolExecutor(max_workers=len(downstream_nodes)) as executor:
             future_to_node = {
                 executor.submit(fetch_node_workers, node, address): node 
-                for node in POOL_NODES
+                for node in downstream_nodes
             }
             
             for future in as_completed(future_to_node):
@@ -351,7 +358,24 @@ def get_workers():
                 try:
                     workers = future.result()
                     if workers:
-                        all_workers.extend(workers)
+                        # Parse the C format workers: ["name", hashrate, "", shares]
+                        for worker in workers:
+                            if isinstance(worker, list) and len(worker) >= 4:
+                                worker_name = worker[0] if worker[0] else "Unknown"
+                                worker_hashrate = worker[1] if len(worker) > 1 else 0
+                                worker_shares = worker[3] if len(worker) > 3 else 0
+                                
+                                # Create proper worker object
+                                worker_obj = {
+                                    "identifier": worker_name,
+                                    "name": worker_name,
+                                    "hashrate": worker_hashrate,
+                                    "shares": worker_shares,
+                                    "timestamp": int(time.time()),  # Current time as last seen
+                                    "node": node_url
+                                }
+                                all_workers.append(worker_obj)
+                                
                 except Exception as e:
                     logger.error(f"Error fetching workers from {node_url}: {e}")
         
