@@ -18,7 +18,7 @@ import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Configuration
-REDIS_HOST = 'core.supportsal.com'
+REDIS_HOST = 'localhost'
 REDIS_PORT = 6379
 REDIS_DB = 0
 API_PORT = 5000
@@ -102,6 +102,23 @@ def store_miner_hashrate(address, hashrate):
     """Store miner hashrate data for charting"""
     timestamp = int(time.time())
     key = f'miner:{address}:hashrate'
+    
+    # Store the data point
+    r.zadd(key, {f"{timestamp}:{hashrate}": timestamp})
+    
+    # Set TTL on the sorted set
+    r.expire(key, TTL)
+    
+    # Clean old entries (keep last 3 days)
+    cutoff = timestamp - TTL
+    r.zremrangebyscore(key, "-inf", cutoff)
+
+def store_worker_hashrate(address, worker_name, hashrate):
+    """Store individual worker hashrate data for charting"""
+    timestamp = int(time.time())
+    # Clean worker name for use as Redis key
+    safe_worker_name = worker_name.replace(':', '_').replace(' ', '_')
+    key = f'worker:{address}:{safe_worker_name}:hashrate'
     
     # Store the data point
     r.zadd(key, {f"{timestamp}:{hashrate}": timestamp})
@@ -446,6 +463,10 @@ def get_workers():
                                 worker_name = workers[i] if workers[i] else f"Worker-{i//2 + 1}"
                                 worker_value = workers[i + 1] if isinstance(workers[i + 1], (int, float)) else 0
                                 
+                                # Store worker hashrate for charting
+                                if worker_value > 0:
+                                    store_worker_hashrate(address, worker_name, worker_value)
+                                
                                 # The value could be hashrate or shares, let's assume it's hashrate for now
                                 worker_obj = {
                                     "identifier": worker_name,
@@ -476,6 +497,7 @@ def get_chart_data():
         start_time, end_time = get_time_range(hours)
         chart_type = request.args.get('type', 'pool')
         address = request.args.get('address', '')
+        worker = request.args.get('worker', '')
         
         chart_data = {}
         
@@ -492,6 +514,13 @@ def get_chart_data():
             miner_key = f'miner:{address}:hashrate'
             miner_data = r.zrangebyscore(miner_key, start_time, end_time)
             chart_data['miner_hashrate'] = parse_redis_timeseries(miner_data)
+            
+        if chart_type == 'worker' and address and worker:
+            # Get individual worker hashrate data
+            safe_worker_name = worker.replace(':', '_').replace(' ', '_')
+            worker_key = f'worker:{address}:{safe_worker_name}:hashrate'
+            worker_data = r.zrangebyscore(worker_key, start_time, end_time)
+            chart_data['worker_hashrate'] = parse_redis_timeseries(worker_data)
         
         return jsonify(chart_data)
         
