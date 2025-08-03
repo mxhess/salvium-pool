@@ -1083,6 +1083,167 @@ process_blocks(block_t *blocks, size_t count)
     return rc;
 }
 
+// Get shares for an address in PPLNS window
+uint64_t account_pplns_shares(const char *address)
+{
+    int rc = 0;
+    char *err = NULL;
+    MDB_txn *txn = NULL;
+    MDB_cursor *cursor = NULL;
+    uint64_t total_shares = 0;
+    time_t cutoff_time = time(NULL) - (24 * 3600); // 24h PPLNS window
+
+    if (strlen(address) > ADDRESS_MAX)
+        return 0;
+
+    pthread_rwlock_rdlock(&rwlock_tx);
+
+    if ((rc = pdb_txn_begin(env, NULL, MDB_RDONLY, &txn)))
+    {
+        err = mdb_strerror(rc);
+        log_error("%s", err);
+        goto cleanup;
+    }
+    if ((rc = mdb_cursor_open(txn, db_shares, &cursor)))
+    {
+        err = mdb_strerror(rc);
+        log_error("%s", err);
+        mdb_txn_abort(txn);
+        goto cleanup;
+    }
+
+    MDB_cursor_op op = MDB_LAST;
+    while (1)
+    {
+        MDB_val key, val;
+        if ((rc = mdb_cursor_get(cursor, &key, &val, op)))
+        {
+            if (rc != MDB_NOTFOUND)
+            {
+                err = mdb_strerror(rc);
+                log_error("%s", err);
+            }
+            break;
+        }
+        op = MDB_PREV;
+        
+        share_t *share = (share_t*)val.mv_data;
+        if (share->timestamp < cutoff_time)
+            break;
+            
+        if (strncmp(share->address, address, ADDRESS_MAX) == 0)
+            total_shares += share->difficulty;
+    }
+
+cleanup:
+    pthread_rwlock_unlock(&rwlock_tx);
+    if (cursor)
+        mdb_cursor_close(cursor);
+    if (txn)
+        mdb_txn_abort(txn);
+    return total_shares;
+}
+
+// Get total pool PPLNS shares 
+uint64_t pool_pplns_shares(void)
+{
+    int rc = 0;
+    char *err = NULL;
+    MDB_txn *txn = NULL;
+    MDB_cursor *cursor = NULL;
+    uint64_t total_shares = 0;
+    time_t cutoff_time = time(NULL) - (24 * 3600);
+
+    pthread_rwlock_rdlock(&rwlock_tx);
+
+    if ((rc = pdb_txn_begin(env, NULL, MDB_RDONLY, &txn)))
+    {
+        err = mdb_strerror(rc);
+        log_error("%s", err);
+        goto cleanup;
+    }
+    if ((rc = mdb_cursor_open(txn, db_shares, &cursor)))
+    {
+        err = mdb_strerror(rc);
+        log_error("%s", err);
+        mdb_txn_abort(txn);
+        goto cleanup;
+    }
+
+    MDB_cursor_op op = MDB_LAST;
+    while (1)
+    {
+        MDB_val key, val;
+        if ((rc = mdb_cursor_get(cursor, &key, &val, op)))
+            break;
+        op = MDB_PREV;
+        
+        share_t *share = (share_t*)val.mv_data;
+        if (share->timestamp < cutoff_time)
+            break;
+            
+        total_shares += share->difficulty;
+    }
+
+cleanup:
+    pthread_rwlock_unlock(&rwlock_tx);
+    if (cursor)
+        mdb_cursor_close(cursor);
+    if (txn)
+        mdb_txn_abort(txn);
+    return total_shares;
+}
+
+// Get total shares for an address
+uint64_t account_total_shares(const char *address)
+{
+    int rc = 0;
+    char *err = NULL;
+    MDB_txn *txn = NULL;
+    MDB_cursor *cursor = NULL;
+    uint64_t total_shares = 0;
+
+    if (strlen(address) > ADDRESS_MAX)
+        return 0;
+
+    pthread_rwlock_rdlock(&rwlock_tx);
+
+    if ((rc = pdb_txn_begin(env, NULL, MDB_RDONLY, &txn)))
+    {
+        err = mdb_strerror(rc);
+        log_error("%s", err);
+        goto cleanup;
+    }
+    if ((rc = mdb_cursor_open(txn, db_shares, &cursor)))
+    {
+        err = mdb_strerror(rc);
+        log_error("%s", err);
+        mdb_txn_abort(txn);
+        goto cleanup;
+    }
+
+    MDB_cursor_op op = MDB_FIRST;
+    while (1)
+    {
+        MDB_val key, val;
+        if ((rc = mdb_cursor_get(cursor, &key, &val, op)))
+            break;
+        op = MDB_NEXT;
+        
+        share_t *share = (share_t*)val.mv_data;
+        if (strncmp(share->address, address, ADDRESS_MAX) == 0)
+            total_shares += share->difficulty;
+    }
+
+cleanup:
+    pthread_rwlock_unlock(&rwlock_tx);
+    if (cursor)
+        mdb_cursor_close(cursor);
+    if (txn)
+        mdb_txn_abort(txn);
+    return total_shares;
+}
+
 static void
 update_pool_hr(void)
 {
@@ -3908,9 +4069,9 @@ int shared_template_update(const block_template_t *new_template)
     shared_template->tx_count = new_template->tx_count;
     shared_template->timestamp = time(NULL);
     
-    strncpy(shared_template->seed_hash, new_template->seed_hash, 64);
-    strncpy(shared_template->next_seed_hash, new_template->next_seed_hash, 64);
-    strncpy(shared_template->prev_hash, new_template->prev_hash, 64);
+    strncpy(shared_template->seed_hash, new_template->seed_hash, 65);
+    strncpy(shared_template->next_seed_hash, new_template->next_seed_hash, 65);
+    strncpy(shared_template->prev_hash, new_template->prev_hash, 65);
     
     // Note: For simplicity, we're copying the hash strings
     // In production, you might want to store the blob data in shared memory too
@@ -3955,9 +4116,9 @@ int shared_template_get_latest(block_template_t *local_template)
     local_template->reserved_offset = shared_template->reserved_offset;
     local_template->tx_count = shared_template->tx_count;
     
-    strncpy(local_template->seed_hash, shared_template->seed_hash, 64);
-    strncpy(local_template->next_seed_hash, shared_template->next_seed_hash, 64);
-    strncpy(local_template->prev_hash, shared_template->prev_hash, 64);
+    strncpy(local_template->seed_hash, shared_template->seed_hash, 65);
+    strncpy(local_template->next_seed_hash, shared_template->next_seed_hash, 65);
+    strncpy(local_template->prev_hash, shared_template->prev_hash, 65);
     
     // Update local version
     local_template_version = shared_template->template_version;
