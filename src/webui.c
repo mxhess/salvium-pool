@@ -157,6 +157,54 @@ send_json_stats(struct evhttp_request *req, void *arg)
 }
 
 static void
+send_json_pplns(struct evhttp_request *req, void *arg)
+{
+    struct evbuffer *buf = evhttp_request_get_output_buffer(req);
+    const char *uri = evhttp_request_get_uri(req);
+    const char *address = uri + 7; // Skip "/pplns/"
+    
+    uint64_t pplns_shares = account_pplns_shares(address);
+    uint64_t total_pplns = pool_pplns_shares();
+    uint64_t total_shares = account_total_shares(address);
+    double percentage = total_pplns > 0 ? (double)pplns_shares / total_pplns * 100.0 : 0.0;
+    
+    evbuffer_add_printf(buf, "{"
+        "\"address\":\"%.12s...\","
+        "\"pplns_shares\":%"PRIu64","
+        "\"total_shares\":%"PRIu64","
+        "\"pool_pplns_shares\":%"PRIu64","
+        "\"pplns_percentage\":%.4f"
+        "}", address, pplns_shares, total_shares, total_pplns, percentage);
+    
+    struct evkeyvalq *hdrs_out = evhttp_request_get_output_headers(req);
+    evhttp_add_header(hdrs_out, "Content-Type", "application/json");
+    evhttp_send_reply(req, HTTP_OK, "OK", buf);
+}
+
+static void
+send_json_shares(struct evhttp_request *req, void *arg)
+{
+    struct evbuffer *buf = evhttp_request_get_output_buffer(req);
+    const char *uri = evhttp_request_get_uri(req);
+    const char *address = uri + 8; // Skip "/shares/"
+    
+    uint64_t total_shares = account_total_shares(address);
+    uint64_t pplns_shares = account_pplns_shares(address);
+    uint64_t wc = worker_count(address);
+    
+    evbuffer_add_printf(buf, "{"
+        "\"address\":\"%.12s...\","
+        "\"total_shares\":%"PRIu64","
+        "\"pplns_shares\":%"PRIu64","
+        "\"worker_count\":%"PRIu64
+        "}", address, total_shares, pplns_shares, wc);
+    
+    struct evkeyvalq *hdrs_out = evhttp_request_get_output_headers(req);
+    evhttp_add_header(hdrs_out, "Content-Type", "application/json");
+    evhttp_send_reply(req, HTTP_OK, "OK", buf);
+}
+
+static void
 process_request(struct evhttp_request *req, void *arg)
 {
     const char *url = evhttp_request_get_uri(req);
@@ -172,6 +220,19 @@ process_request(struct evhttp_request *req, void *arg)
     if (strstr(url, "/workers") != NULL)
     {
         send_json_workers(req, arg);
+        return;
+    }
+
+    // NEW ENDPOINTS
+    if (strstr(url, "/pplns/") != NULL)
+    {
+        send_json_pplns(req, arg);
+        return;
+    }
+
+    if (strstr(url, "/shares/") != NULL)
+    {
+        send_json_shares(req, arg);
         return;
     }
 
