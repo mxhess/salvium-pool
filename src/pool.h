@@ -37,4 +37,8 @@ uint64_t account_balance(const char *address);
 uint64_t worker_count(const char *address);
 void worker_list(char *list_start, char *list_end, const char *address);
 
+uint64_t account_pplns_shares(const char *address);
+uint64_t pool_pplns_shares(void);
+uint64_t account_total_shares(const char *address);
+
 #endif
