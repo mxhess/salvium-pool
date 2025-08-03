@@ -164,6 +164,7 @@ typedef struct config_t
     char pool_wallet[ADDRESS_MAX];
     char pool_fee_wallet[ADDRESS_MAX];
     uint64_t pool_start_diff;
+    uint64_t pool_min_diff;
     uint64_t pool_fixed_diff;
     uint64_t pool_nicehash_diff;
     double share_mul;
@@ -1311,7 +1312,8 @@ client_target(client_t *client, job_t *job)
 {
     uint32_t rtt = client->is_xnp ? 5 : config.retarget_time;
     uint64_t bd = 0xFFFFFFFFFFFFFFFF;
-    uint64_t sd = config.pool_start_diff;
+    uint64_t sd = config.pool_start_diff;     // Starting suggestion
+    uint64_t md = config.pool_min_diff;       // NEW: Absolute minimum
     uint64_t cd;
     double duration;
     unsigned idx = 0;
@@ -1319,17 +1321,27 @@ client_target(client_t *client, job_t *job)
 
     if (config.pool_fixed_diff)
         return config.pool_fixed_diff;
+        
+    // Apply hierarchy for minimums
     if (client->is_nicehash)
-        sd = MAX(config.pool_nicehash_diff, sd);
+        md = MAX(config.pool_nicehash_diff, md);
     if (client->req_diff)
-        sd = MAX(client->req_diff, sd);
+        md = MAX(client->req_diff, md);          // d= can still override minimum
+        
     if (job->block_template)
         bd = job->block_template->difficulty;
+        
     duration = difftime(time(NULL), client->connected_since);
     if (duration > hr_intervals[2])
         idx = 1;
-    cd = client->hr_stats.avg[idx] * rtt;
-    rt = MIN(MAX(cd, sd), bd);
+        
+    // Use start_diff for new connections, then switch to calculated
+    if (duration < 60)  // First minute uses start_diff
+        cd = sd;
+    else
+        cd = client->hr_stats.avg[idx] * rtt;
+        
+    rt = MIN(MAX(cd, md), bd);  // Enforce absolute minimum instead of start_diff
     return rt;
 }
 
@@ -4240,7 +4252,8 @@ read_config(const char *config_file)
     config.rpc_timeout = 15;
     config.idle_timeout = 150;
     config.template_timeout = 120;
-    config.pool_start_diff = 1000;
+    config.pool_start_diff = 50000;
+    config.pool_min_diff = 5000;
     config.pool_nicehash_diff = 280000;
     config.share_mul = 2.0;
     config.retarget_time = 30;
@@ -4372,6 +4385,10 @@ read_config(const char *config_file)
         else if (strcmp(key, "pool-start-diff") == 0)
         {
             config.pool_start_diff = strtoumax(val, NULL, 10);
+        }
+        else if (strcmp(key, "pool-min-diff") == 0)
+        {
+            config.pool_min_diff = strtoumax(val, NULL, 10);
         }
         else if (strcmp(key, "pool-fixed-diff") == 0)
         {
@@ -4580,6 +4597,7 @@ print_config(void)
         "  pool-wallet = %s\n"
         "  pool-fee-wallet = %s\n"
         "  pool-start-diff = %"PRIu64"\n"
+        "  pool-min-diff = %"PRIu64"\n"
         "  pool-fixed-diff = %"PRIu64"\n"
         "  pool-nicehash-diff = %"PRIu64"\n"
         "  pool-fee = %g\n"
@@ -4619,6 +4637,7 @@ print_config(void)
         config.pool_wallet,
         config.pool_fee_wallet,
         config.pool_start_diff,
+        config.pool_min_diff,
         config.pool_fixed_diff,
         config.pool_nicehash_diff,
         config.pool_fee,
